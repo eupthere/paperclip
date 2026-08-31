@@ -164,6 +164,112 @@ describe("TaskChatThread runtime transcript selection", () => {
     expect(legacyRuns.map((run) => run.id)).toEqual(["legacy-run"]);
     expect(nativeRuns.map((run) => run.id)).toEqual(["native-run"]);
   });
+
+  it("uses runner-only controls only for an actual native Paperclip Runner run", () => {
+    nativeTranscriptState.transcriptByRun.set("native-run", [
+      {
+        kind: "assistant",
+        ts: "2026-08-25T18:00:01.000Z",
+        text: "Checking the task.",
+        channel: "progress",
+      },
+      {
+        kind: "assistant",
+        ts: "2026-08-25T18:00:02.000Z",
+        text: "The task is ready.",
+        channel: "final",
+      },
+    ]);
+
+    const run = {
+      id: "native-run",
+      runtimeMode: "native" as const,
+      status: "running" as const,
+      invocationSource: "issue" as const,
+      triggerDetail: null,
+      startedAt: "2026-08-25T18:00:00.000Z",
+      finishedAt: null,
+      createdAt: "2026-08-25T18:00:00.000Z",
+      agentId: "agent-1",
+      agentName: "Runner",
+      adapterType: "paperclip_runner",
+    };
+
+    render(
+      <TaskChatThread
+        comments={[]}
+        onAdd={async () => {}}
+        issueStatus="in_progress"
+        activeRun={run}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="task-chat-runner-turn"]')).not.toBeNull();
+    expect(container.textContent).toContain("Checking the task.");
+    expect(container.textContent).toContain("The task is ready.");
+
+    render(
+      <TaskChatThread
+        comments={[]}
+        onAdd={async () => {}}
+        issueStatus="in_progress"
+        activeRun={{ ...run, runtimeMode: "legacy" }}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="task-chat-runner-turn"]')).toBeNull();
+  });
+
+  it("keeps legacy channel-less native messages readable across settlement", () => {
+    nativeTranscriptState.transcriptByRun.set("native-run", [
+      {
+        kind: "assistant",
+        ts: "2026-08-25T18:00:01.000Z",
+        text: "Persisted before message channels existed.",
+        channel: "unknown",
+      },
+    ]);
+
+    const run = {
+      id: "native-run",
+      runtimeMode: "native" as const,
+      status: "running" as const,
+      invocationSource: "issue" as const,
+      triggerDetail: null,
+      startedAt: "2026-08-25T18:00:00.000Z",
+      finishedAt: null,
+      createdAt: "2026-08-25T18:00:00.000Z",
+      agentId: "agent-1",
+      agentName: "Runner",
+      adapterType: "paperclip_runner",
+    };
+
+    render(
+      <TaskChatThread
+        comments={[]}
+        onAdd={async () => {}}
+        issueStatus="in_progress"
+        activeRun={run}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="task-chat-progress-update"]')?.textContent)
+      .toContain("Persisted before message channels existed.");
+    expect(container.querySelector('[data-testid="task-chat-final-response"]')).toBeNull();
+
+    render(
+      <TaskChatThread
+        comments={[]}
+        onAdd={async () => {}}
+        issueStatus="done"
+        activeRun={{ ...run, status: "succeeded", finishedAt: "2026-08-25T18:00:02.000Z" }}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="task-chat-progress-update"]')).toBeNull();
+    expect(container.querySelector('[data-testid="task-chat-final-response"]')?.textContent)
+      .toContain("Persisted before message channels existed.");
+  });
 });
 
 describe("TaskChatThread composer alignment", () => {

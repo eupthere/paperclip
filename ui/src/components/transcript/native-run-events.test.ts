@@ -230,7 +230,62 @@ describe("nativeRunEventsToTranscript", () => {
     expect(nativeRunEventsToTranscript([
       event(1, "run.result.proposed", { summary: "Recovered final reply." }),
     ])).toEqual([
-      expect.objectContaining({ kind: "assistant", text: "Recovered final reply." }),
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Recovered final reply.",
+        channel: "final",
+      }),
+    ]);
+  });
+
+  it("keeps progress separate from the final runner response", () => {
+    expect(nativeRunEventsToTranscript([
+      event(1, "item.completed", {
+        itemId: "progress-1",
+        kind: "agentMessage",
+        channel: "progress",
+        text: "Checking the implementation.",
+      }),
+      event(2, "run.result.accepted", {
+        result: { summary: "The implementation is ready." },
+      }),
+    ])).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Checking the implementation.",
+        channel: "progress",
+      }),
+      expect.objectContaining({
+        kind: "assistant",
+        text: "The implementation is ready.",
+        channel: "final",
+      }),
+    ]);
+  });
+
+  it("projects provider-neutral activity without exposing provider envelopes", () => {
+    expect(nativeRunEventsToTranscript([
+      event(1, "research.started", {
+        researchId: "research-1",
+        query: "current behavior",
+        status: "running",
+      }),
+      event(2, "research.completed", {
+        researchId: "research-1",
+        summary: "Found the relevant contract.",
+        status: "completed",
+      }),
+    ])).toEqual([
+      expect.objectContaining({
+        kind: "tool_call",
+        name: "research",
+        toolUseId: "research:research-1",
+      }),
+      expect.objectContaining({
+        kind: "tool_result",
+        toolUseId: "research:research-1",
+        content: "Found the relevant contract.",
+      }),
     ]);
   });
 
@@ -247,7 +302,7 @@ describe("nativeRunEventsToTranscript", () => {
     expect(nativeRunEventsToTranscript([
       mismatched,
       malformed,
-      event(3, "plan.updated", { explanation: "not a transcript row" }),
+      event(3, "extension.unknown", { explanation: "not a transcript row" }),
     ])).toEqual([]);
   });
 });

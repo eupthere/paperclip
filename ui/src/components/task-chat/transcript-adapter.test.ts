@@ -163,6 +163,38 @@ describe("transcriptToTaskChatItems tool_call updates", () => {
 });
 
 describe("transcriptToTaskChatItems native usage", () => {
+  it("does not merge progress and final runner messages", () => {
+    const items = transcriptToTaskChatItems([
+      {
+        kind: "assistant",
+        ts: TS,
+        text: "Checking files.",
+        channel: "progress",
+      },
+      {
+        kind: "assistant",
+        ts: TS,
+        text: "The change is ready.",
+        channel: "final",
+      },
+    ], { runId: "native-run", running: true });
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        text: "Checking files.",
+        channel: "progress",
+        interstitial: true,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        text: "The change is ready.",
+        channel: "final",
+        interstitial: false,
+      }),
+    ]);
+  });
+
   it("renders runner usage without inventing a context-window size", () => {
     const items = transcriptToTaskChatItems([{
       kind: "result",

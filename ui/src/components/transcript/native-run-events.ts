@@ -15,6 +15,103 @@ function finiteNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
+function normalizedItem(payload: Record<string, unknown>): Record<string, unknown> {
+  return record(payload.item) ?? payload;
+}
+
+function normalizedItemKind(payload: Record<string, unknown>): string {
+  const item = normalizedItem(payload);
+  return (text(payload.kind) ?? text(item.kind) ?? text(item.type) ?? "")
+    .replaceAll("_", "")
+    .toLowerCase();
+}
+
+function normalizedItemId(
+  envelope: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): string | null {
+  const item = normalizedItem(payload);
+  return text(envelope.itemId) ?? text(payload.itemId) ?? text(item.id);
+}
+
+function normalizedItemText(payload: Record<string, unknown>): string | null {
+  const item = normalizedItem(payload);
+  return text(payload.text) ?? text(item.text);
+}
+
+function assistantChannel(
+  payload: Record<string, unknown>,
+): "progress" | "final" | "unknown" {
+  const item = normalizedItem(payload);
+  const value = text(payload.channel) ?? text(item.channel);
+  return value === "progress" || value === "final" ? value : "unknown";
+}
+
+function reasoningChannel(
+  payload: Record<string, unknown>,
+): "summary" | "detail" | "unknown" {
+  const item = normalizedItem(payload);
+  const value = text(payload.channel) ?? text(item.channel);
+  return value === "summary" || value === "detail" ? value : "unknown";
+}
+
+const PROVIDER_ACTIVITY_PREFIXES = [
+  "plan.",
+  "research.",
+  "delegation.",
+  "model.",
+  "context.",
+  "artifact.",
+  "review.",
+  "hook.",
+  "memory.",
+  "safety.",
+  "terminal.",
+  "wait.",
+  "provider.notice.",
+] as const;
+
+function providerActivityPresentation(
+  event: HeartbeatRunEvent,
+  payload: Record<string, unknown>,
+): { id: string; name: string; summary: string; terminal: boolean; failed: boolean } | null {
+  if (!PROVIDER_ACTIVITY_PREFIXES.some((prefix) => event.eventType.startsWith(prefix))) {
+    return null;
+  }
+  const identity = [
+    "planId",
+    "executionId",
+    "researchId",
+    "delegationId",
+    "routeId",
+    "verificationId",
+    "compactionId",
+    "artifactId",
+    "reviewId",
+    "hookId",
+    "citationId",
+    "waitId",
+    "noticeId",
+  ].map((key) => text(payload[key])).find(Boolean) ?? String(event.seq);
+  const family = event.eventType.split(".")[0] ?? "provider";
+  const name = family === "provider" ? "Provider notice" : family.replaceAll("_", " ");
+  const summary = text(payload.summary)
+    ?? text(payload.name)
+    ?? text(payload.query)
+    ?? text(payload.message)
+    ?? event.eventType;
+  const status = text(payload.status);
+  const failed = status === "failed" || status === "denied" || payload.severity === "error";
+  const terminal = failed
+    || status === "completed"
+    || status === "cancelled"
+    || status === "interrupted"
+    || event.eventType.endsWith(".completed")
+    || event.eventType.endsWith(".failed")
+    || (!event.eventType.endsWith(".started") && !event.eventType.endsWith(".progressed"));
+  return { id: `${family}:${identity}`, name, summary, terminal, failed };
+}
+
 function timestamp(event: HeartbeatRunEvent, envelope: Record<string, unknown>): string {
   const emittedAt = text(envelope.emittedAt);
   if (emittedAt) return emittedAt;
@@ -50,7 +147,7 @@ function toolPresentation(payload: Record<string, unknown>): { name: string; inp
 export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
   const startedToolIds = new Set<string>();
-  let hasAssistantMessage = false;
+  let hasFinalAssistantMessage = false;
   let usageSummary: {
     ts: string;
     inputTokens: number;
@@ -67,6 +164,7 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
   } | null = null;
   const orderedEvents = [...events].sort((a, b) => a.seq - b.seq);
   const completedAgentMessageIds = new Set<string>();
+  const completedReasoningIds = new Set<string>();
   for (const event of orderedEvents) {
     if (event.eventType !== "item.completed") continue;
     const envelope = record(event.payload?.prpEvent);
@@ -77,9 +175,14 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
       || envelope.eventType !== event.eventType
     ) continue;
     const payload = record(envelope?.payload);
-    const itemId = text(payload?.itemId);
-    if (payload?.kind === "agentMessage" && itemId && text(payload.text)) {
+    if (!payload) continue;
+    const itemId = normalizedItemId(envelope, payload);
+    const kind = normalizedItemKind(payload);
+    if (kind === "agentmessage" && itemId && normalizedItemText(payload)) {
       completedAgentMessageIds.add(itemId);
+    }
+    if (kind === "reasoning" && itemId && normalizedItemText(payload)) {
+      completedReasoningIds.add(itemId);
     }
   }
 
@@ -91,23 +194,79 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
     if (!payload) continue;
     const ts = timestamp(event, envelope);
 
-    if (event.eventType === "item.delta" && payload.kind === "agentMessage") {
-      const value = text(payload.text);
-      const itemId = text(payload.itemId);
+    const itemKind = normalizedItemKind(payload);
+    const itemId = normalizedItemId(envelope, payload);
+
+    if (event.eventType === "item.delta" && itemKind === "agentmessage") {
+      const value = normalizedItemText(payload);
       if (!value || !itemId) continue;
       // Once the loss-resistant completion is present, prefer its full text.
       // Before that point the deltas still provide the live streaming view.
       if (completedAgentMessageIds.has(itemId)) continue;
-      hasAssistantMessage = true;
-      entries.push({ kind: "assistant", ts, text: value, delta: true });
+      const channel = assistantChannel(payload);
+      if (channel === "final") hasFinalAssistantMessage = true;
+      entries.push({ kind: "assistant", ts, text: value, delta: true, channel });
       continue;
     }
 
-    if (event.eventType === "item.completed" && payload.kind === "agentMessage") {
-      const value = text(payload.text);
+    if (event.eventType === "item.completed" && itemKind === "agentmessage") {
+      const value = normalizedItemText(payload);
       if (!value) continue;
-      hasAssistantMessage = true;
-      entries.push({ kind: "assistant", ts, text: value });
+      const channel = assistantChannel(payload);
+      if (channel !== "progress") hasFinalAssistantMessage = true;
+      entries.push({ kind: "assistant", ts, text: value, channel });
+      continue;
+    }
+
+    if (event.eventType === "item.delta" && itemKind === "reasoning") {
+      const value = normalizedItemText(payload);
+      if (!value || !itemId || completedReasoningIds.has(itemId)) continue;
+      entries.push({
+        kind: "thinking",
+        ts,
+        text: value,
+        delta: true,
+        lifecycle: "started",
+        channel: reasoningChannel(payload),
+      });
+      continue;
+    }
+
+    if (event.eventType === "item.completed" && itemKind === "reasoning") {
+      const value = normalizedItemText(payload);
+      if (!value) continue;
+      entries.push({
+        kind: "thinking",
+        ts,
+        text: value,
+        lifecycle: "completed",
+        channel: reasoningChannel(payload),
+      });
+      continue;
+    }
+
+    const providerActivity = providerActivityPresentation(event, payload);
+    if (providerActivity) {
+      if (!startedToolIds.has(providerActivity.id)) {
+        startedToolIds.add(providerActivity.id);
+        entries.push({
+          kind: "tool_call",
+          ts,
+          name: providerActivity.name,
+          toolUseId: providerActivity.id,
+          input: { eventType: event.eventType, summary: providerActivity.summary },
+        });
+      }
+      if (providerActivity.terminal) {
+        entries.push({
+          kind: "tool_result",
+          ts,
+          toolUseId: providerActivity.id,
+          toolName: providerActivity.name,
+          content: providerActivity.summary,
+          isError: providerActivity.failed,
+        });
+      }
       continue;
     }
 
@@ -178,11 +337,15 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
       continue;
     }
 
-    if (event.eventType === "run.result.proposed" && !hasAssistantMessage) {
-      const summary = text(payload.summary);
+    if (
+      (event.eventType === "run.result.proposed" || event.eventType === "run.result.accepted")
+      && !hasFinalAssistantMessage
+    ) {
+      const result = event.eventType === "run.result.accepted" ? record(payload.result) ?? payload : payload;
+      const summary = text(result.summary);
       if (summary) {
-        hasAssistantMessage = true;
-        entries.push({ kind: "assistant", ts, text: summary });
+        hasFinalAssistantMessage = true;
+        entries.push({ kind: "assistant", ts, text: summary, channel: "final" });
       }
       continue;
     }
