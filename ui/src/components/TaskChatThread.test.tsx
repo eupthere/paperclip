@@ -270,6 +270,52 @@ describe("TaskChatThread runtime transcript selection", () => {
     expect(container.querySelector('[data-testid="task-chat-final-response"]')?.textContent)
       .toContain("Persisted before message channels existed.");
   });
+
+  it("recomputes a runner turn when only the message channel changes", () => {
+    const run = {
+      id: "native-run",
+      runtimeMode: "native" as const,
+      status: "running" as const,
+      invocationSource: "issue" as const,
+      triggerDetail: null,
+      startedAt: "2026-08-25T18:00:00.000Z",
+      finishedAt: null,
+      createdAt: "2026-08-25T18:00:00.000Z",
+      agentId: "agent-1",
+      agentName: "Runner",
+      adapterType: "paperclip_runner",
+    };
+    const renderRun = () => render(
+      <TaskChatThread
+        comments={[]}
+        onAdd={async () => {}}
+        issueStatus="in_progress"
+        activeRun={run}
+      />,
+    );
+
+    nativeTranscriptState.transcriptByRun.set("native-run", [{
+      kind: "assistant",
+      ts: "2026-08-25T18:00:01.000Z",
+      text: "Same text.",
+      channel: "progress",
+    }]);
+    renderRun();
+    expect(container.querySelector('[data-testid="task-chat-progress-update"]')?.textContent)
+      .toContain("Same text.");
+    expect(container.querySelector('[data-testid="task-chat-final-response"]')).toBeNull();
+
+    nativeTranscriptState.transcriptByRun.set("native-run", [{
+      kind: "assistant",
+      ts: "2026-08-25T18:00:01.000Z",
+      text: "Same text.",
+      channel: "final",
+    }]);
+    renderRun();
+    expect(container.querySelector('[data-testid="task-chat-progress-update"]')).toBeNull();
+    expect(container.querySelector('[data-testid="task-chat-final-response"]')?.textContent)
+      .toContain("Same text.");
+  });
 });
 
 describe("TaskChatThread composer alignment", () => {

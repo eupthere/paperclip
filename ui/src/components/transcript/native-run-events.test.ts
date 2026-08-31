@@ -110,6 +110,24 @@ describe("nativeRunEventsToTranscript", () => {
     ]);
   });
 
+  it("reads the canonical PRP v1 assistant_message kind as a channel-less final reply", () => {
+    expect(nativeRunEventsToTranscript([
+      event(1, "item.completed", {
+        kind: "assistant_message",
+        text: "Canonical persisted reply.",
+      }),
+      event(2, "run.result.proposed", {
+        summary: "Structured fallback must not replace the reply.",
+      }),
+    ])).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Canonical persisted reply.",
+        channel: "unknown",
+      }),
+    ]);
+  });
+
   it("sums run deltas without leaking session-cumulative usage", () => {
     const transcript = nativeRunEventsToTranscript([
       event(1, "usage.reported", {
@@ -266,13 +284,15 @@ describe("nativeRunEventsToTranscript", () => {
   it("projects provider-neutral activity without exposing provider envelopes", () => {
     expect(nativeRunEventsToTranscript([
       event(1, "research.started", {
+        schema: "paperclip.research.v1",
         researchId: "research-1",
         query: "current behavior",
         status: "running",
       }),
       event(2, "research.completed", {
+        schema: "paperclip.research.v1",
         researchId: "research-1",
-        summary: "Found the relevant contract.",
+        query: "current behavior",
         status: "completed",
       }),
     ])).toEqual([
@@ -284,9 +304,53 @@ describe("nativeRunEventsToTranscript", () => {
       expect.objectContaining({
         kind: "tool_result",
         toolUseId: "research:research-1",
-        content: "Found the relevant contract.",
+        content: "current behavior",
       }),
     ]);
+  });
+
+  it.each(["running", "pending", "in_progress"])(
+    "keeps an explicitly %s activity open even when its event suffix looks terminal",
+    (status) => {
+      expect(nativeRunEventsToTranscript([
+        event(1, "artifact.generated", {
+          schema: "paperclip.artifact.generated.v1",
+          artifactId: "artifact-1",
+          status,
+          reference: "artifacts/preview.png",
+        }),
+      ])).toEqual([
+        expect.objectContaining({
+          kind: "tool_call",
+          toolUseId: "artifact:artifact-1",
+        }),
+      ]);
+    },
+  );
+
+  it("fails closed for unsupported versions, prefix lookalikes, and mismatched payload schemas", () => {
+    const unsupportedVersion = event(1, "model.verification.updated", {
+      schema: "paperclip.model.verification.v1",
+      verificationId: "verification-1",
+      status: "completed",
+      summary: "must not render",
+    });
+    (unsupportedVersion.payload!.prpEvent as Record<string, unknown>).schemaVersion = 2;
+
+    expect(nativeRunEventsToTranscript([
+      unsupportedVersion,
+      event(2, "model.provider_message.recorded", {
+        schema: "paperclip.model.provider_message.v1",
+        routeId: "route-1",
+        message: "provider envelope must not render",
+      }),
+      event(3, "model.verification.updated", {
+        schema: "paperclip.provider.native.v1",
+        verificationId: "verification-2",
+        status: "completed",
+        summary: "wrong payload schema must not render",
+      }),
+    ])).toEqual([]);
   });
 
   it("fails closed for malformed, mismatched, and unknown event envelopes", () => {

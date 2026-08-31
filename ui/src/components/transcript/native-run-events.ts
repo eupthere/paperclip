@@ -26,6 +26,10 @@ function normalizedItemKind(payload: Record<string, unknown>): string {
     .toLowerCase();
 }
 
+function isAssistantItemKind(kind: string): boolean {
+  return kind === "agentmessage" || kind === "assistantmessage";
+}
+
 function normalizedItemId(
   envelope: Record<string, unknown>,
   payload: Record<string, unknown>,
@@ -55,61 +59,193 @@ function reasoningChannel(
   return value === "summary" || value === "detail" ? value : "unknown";
 }
 
-const PROVIDER_ACTIVITY_PREFIXES = [
-  "plan.",
-  "research.",
-  "delegation.",
-  "model.",
-  "context.",
-  "artifact.",
-  "review.",
-  "hook.",
-  "memory.",
-  "safety.",
-  "terminal.",
-  "wait.",
-  "provider.notice.",
-] as const;
+const PROVIDER_ACTIVITY_PRESENTATIONS = {
+  "plan.updated": {
+    schema: "paperclip.plan.updated.v1",
+    idKey: "planId",
+    name: "plan",
+    summaryKeys: ["explanation"],
+  },
+  "research.started": {
+    schema: "paperclip.research.v1",
+    idKey: "researchId",
+    name: "research",
+    summaryKeys: ["query", "pattern", "url"],
+  },
+  "research.progressed": {
+    schema: "paperclip.research.v1",
+    idKey: "researchId",
+    name: "research",
+    summaryKeys: ["query", "pattern", "url"],
+  },
+  "research.completed": {
+    schema: "paperclip.research.v1",
+    idKey: "researchId",
+    name: "research",
+    summaryKeys: ["query", "pattern", "url"],
+  },
+  "delegation.started": {
+    schema: "paperclip.delegation.v1",
+    idKey: "delegationId",
+    name: "delegation",
+    summaryKeys: ["action"],
+  },
+  "delegation.updated": {
+    schema: "paperclip.delegation.v1",
+    idKey: "delegationId",
+    name: "delegation",
+    summaryKeys: ["action"],
+  },
+  "delegation.completed": {
+    schema: "paperclip.delegation.v1",
+    idKey: "delegationId",
+    name: "delegation",
+    summaryKeys: ["action"],
+  },
+  "model.route.changed": {
+    schema: "paperclip.model.route_changed.v1",
+    idKey: "routeId",
+    name: "model",
+    summaryKeys: ["reason", "effectiveModel"],
+  },
+  "model.verification.updated": {
+    schema: "paperclip.model.verification.v1",
+    idKey: "verificationId",
+    name: "model",
+    summaryKeys: ["summary"],
+  },
+  "context.compacted": {
+    schema: "paperclip.context.compacted.v1",
+    idKey: "compactionId",
+    name: "context",
+    summaryKeys: ["reason"],
+  },
+  "artifact.viewed": {
+    schema: "paperclip.artifact.viewed.v1",
+    idKey: "artifactId",
+    name: "artifact",
+    summaryKeys: ["title", "reference"],
+  },
+  "artifact.generated": {
+    schema: "paperclip.artifact.generated.v1",
+    idKey: "artifactId",
+    name: "artifact",
+    summaryKeys: ["failure", "reference"],
+  },
+  "review.mode.changed": {
+    schema: "paperclip.review.mode_changed.v1",
+    idKey: "reviewId",
+    name: "review",
+    summaryKeys: ["scope", "state"],
+  },
+  "hook.started": {
+    schema: "paperclip.hook.v1",
+    idKey: "hookId",
+    name: "hook",
+    summaryKeys: ["summary", "event"],
+  },
+  "hook.completed": {
+    schema: "paperclip.hook.v1",
+    idKey: "hookId",
+    name: "hook",
+    summaryKeys: ["summary", "event"],
+  },
+  "memory.citation.referenced": {
+    schema: "paperclip.memory.citation.v1",
+    idKey: "citationId",
+    name: "memory",
+    summaryKeys: ["label"],
+  },
+  "safety.review.started": {
+    schema: "paperclip.safety.review.v1",
+    idKey: "reviewId",
+    name: "safety",
+    summaryKeys: ["summary", "decision"],
+  },
+  "safety.review.completed": {
+    schema: "paperclip.safety.review.v1",
+    idKey: "reviewId",
+    name: "safety",
+    summaryKeys: ["summary", "decision"],
+  },
+  "terminal.input.sent": {
+    schema: "paperclip.terminal.input_sent.v1",
+    idKey: "executionId",
+    name: "terminal",
+    summaryKeys: ["inputClass"],
+  },
+  "wait.started": {
+    schema: "paperclip.wait.v1",
+    idKey: "waitId",
+    name: "wait",
+    summaryKeys: ["reason"],
+  },
+  "wait.completed": {
+    schema: "paperclip.wait.v1",
+    idKey: "waitId",
+    name: "wait",
+    summaryKeys: ["reason"],
+  },
+  "provider.notice.recorded": {
+    schema: "paperclip.provider.notice.v1",
+    idKey: "noticeId",
+    name: "Provider notice",
+    summaryKeys: ["summary"],
+  },
+} as const;
+
+type ProviderActivityEventType = keyof typeof PROVIDER_ACTIVITY_PRESENTATIONS;
+
+const NONTERMINAL_PROVIDER_ACTIVITY_STATUSES = new Set([
+  "running",
+  "pending",
+  "in_progress",
+  "waiting",
+]);
+
+const TERMINAL_PROVIDER_ACTIVITY_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "closed",
+  "denied",
+]);
 
 function providerActivityPresentation(
   event: HeartbeatRunEvent,
   payload: Record<string, unknown>,
 ): { id: string; name: string; summary: string; terminal: boolean; failed: boolean } | null {
-  if (!PROVIDER_ACTIVITY_PREFIXES.some((prefix) => event.eventType.startsWith(prefix))) {
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_ACTIVITY_PRESENTATIONS, event.eventType)) {
     return null;
   }
-  const identity = [
-    "planId",
-    "executionId",
-    "researchId",
-    "delegationId",
-    "routeId",
-    "verificationId",
-    "compactionId",
-    "artifactId",
-    "reviewId",
-    "hookId",
-    "citationId",
-    "waitId",
-    "noticeId",
-  ].map((key) => text(payload[key])).find(Boolean) ?? String(event.seq);
-  const family = event.eventType.split(".")[0] ?? "provider";
-  const name = family === "provider" ? "Provider notice" : family.replaceAll("_", " ");
-  const summary = text(payload.summary)
-    ?? text(payload.name)
-    ?? text(payload.query)
-    ?? text(payload.message)
+  const presentation = PROVIDER_ACTIVITY_PRESENTATIONS[
+    event.eventType as ProviderActivityEventType
+  ];
+  if (!presentation || payload.schema !== presentation.schema) return null;
+  const identity = text(payload[presentation.idKey]);
+  if (!identity) return null;
+  const summary = presentation.summaryKeys
+    .map((key) => text(payload[key]))
+    .find((value): value is string => value !== null)
     ?? event.eventType;
   const status = text(payload.status);
   const failed = status === "failed" || status === "denied" || payload.severity === "error";
   const terminal = failed
-    || status === "completed"
-    || status === "cancelled"
-    || status === "interrupted"
-    || event.eventType.endsWith(".completed")
-    || event.eventType.endsWith(".failed")
-    || (!event.eventType.endsWith(".started") && !event.eventType.endsWith(".progressed"));
-  return { id: `${family}:${identity}`, name, summary, terminal, failed };
+    ? true
+    : NONTERMINAL_PROVIDER_ACTIVITY_STATUSES.has(status ?? "")
+      ? false
+      : TERMINAL_PROVIDER_ACTIVITY_STATUSES.has(status ?? "")
+      || event.eventType.endsWith(".completed")
+      || event.eventType.endsWith(".failed")
+      || (!event.eventType.endsWith(".started") && !event.eventType.endsWith(".progressed"));
+  return {
+    id: `${event.eventType.split(".")[0]}:${identity}`,
+    name: presentation.name,
+    summary,
+    terminal,
+    failed,
+  };
 }
 
 function timestamp(event: HeartbeatRunEvent, envelope: Record<string, unknown>): string {
@@ -171,6 +307,7 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
     if (
       !envelope
       || envelope.schema !== "paperclip.prp.event.v1"
+      || envelope.schemaVersion !== 1
       || envelope.runId !== event.runId
       || envelope.eventType !== event.eventType
     ) continue;
@@ -178,7 +315,7 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
     if (!payload) continue;
     const itemId = normalizedItemId(envelope, payload);
     const kind = normalizedItemKind(payload);
-    if (kind === "agentmessage" && itemId && normalizedItemText(payload)) {
+    if (isAssistantItemKind(kind) && itemId && normalizedItemText(payload)) {
       completedAgentMessageIds.add(itemId);
     }
     if (kind === "reasoning" && itemId && normalizedItemText(payload)) {
@@ -188,7 +325,11 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
 
   for (const event of orderedEvents) {
     const envelope = record(event.payload?.prpEvent);
-    if (!envelope || envelope.schema !== "paperclip.prp.event.v1") continue;
+    if (
+      !envelope
+      || envelope.schema !== "paperclip.prp.event.v1"
+      || envelope.schemaVersion !== 1
+    ) continue;
     if (envelope.runId !== event.runId || envelope.eventType !== event.eventType) continue;
     const payload = record(envelope.payload);
     if (!payload) continue;
@@ -197,7 +338,7 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
     const itemKind = normalizedItemKind(payload);
     const itemId = normalizedItemId(envelope, payload);
 
-    if (event.eventType === "item.delta" && itemKind === "agentmessage") {
+    if (event.eventType === "item.delta" && isAssistantItemKind(itemKind)) {
       const value = normalizedItemText(payload);
       if (!value || !itemId) continue;
       // Once the loss-resistant completion is present, prefer its full text.
@@ -209,7 +350,7 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
       continue;
     }
 
-    if (event.eventType === "item.completed" && itemKind === "agentmessage") {
+    if (event.eventType === "item.completed" && isAssistantItemKind(itemKind)) {
       const value = normalizedItemText(payload);
       if (!value) continue;
       const channel = assistantChannel(payload);
@@ -350,10 +491,6 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
       continue;
     }
 
-    if (event.eventType === "provider.notice.recorded" && payload.severity === "error") {
-      const summary = text(payload.summary);
-      if (summary) entries.push({ kind: "stderr", ts, text: summary });
-    }
   }
 
   if (usageSummary) {

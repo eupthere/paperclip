@@ -521,11 +521,16 @@ export function TaskChatThread(props: TaskChatThreadProps) {
   const paperclipRunnerTail =
     tailRunSource?.runtimeMode === "native" &&
     tailRunSource.adapterType === "paperclip_runner";
-  const tailContentKey = tailEntries.reduce((total, entry) => {
-    if ("text" in entry) return total + entry.text.length;
-    if ("content" in entry) return total + entry.content.length;
-    return total + entry.kind.length;
-  }, tailEntries.length);
+  const tailContentKey = tailEntries.reduce((key, entry) => {
+    const textIdentity = "text" in entry ? entry.text : "";
+    const contentIdentity = "content" in entry ? entry.content : "";
+    const channelIdentity = "channel" in entry ? entry.channel ?? "" : "";
+    const lifecycleIdentity = "lifecycle" in entry ? entry.lifecycle ?? "" : "";
+    const statusIdentity = "isError" in entry
+      ? entry.isError ? "error" : "ok"
+      : "";
+    return `${key}|${entry.kind}:${channelIdentity}:${lifecycleIdentity}:${statusIdentity}:${textIdentity}:${contentIdentity}`;
+  }, String(tailEntries.length));
   const blockerContentKey = blockerLinks
     ? `${blockerLinks.directBlocker.id}:${blockerLinks.ultimateBlocker?.id ?? ""}`
     : liveWorkLinks
