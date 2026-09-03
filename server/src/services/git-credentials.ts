@@ -22,6 +22,13 @@ import { secretService } from "./secrets.js";
  * `GITLAB_TOKEN`/`PAPERCLIP_GITLAB_TOKEN` company secret or `GITLAB_TOKEN` server env used for
  * gitlab.com now also authenticates that host, with the credential helper scoped strictly to
  * it — never to gitlab.com or a different configured self-managed host.
+ *
+ * A self-managed instance on a private/internal CA (common — that is usually the whole reason
+ * it is self-managed) can additionally set `PAPERCLIP_GITLAB_CA_CERT_PATH` to a PEM bundle file
+ * on the server's own filesystem. It is applied only to a self-hosted match, never to
+ * gitlab.com: `GIT_SSL_CAINFO` *replaces* git's default trust store for the git process it is
+ * set on rather than adding to it, so applying it unconditionally would break TLS verification
+ * for the public SaaS domain unless that bundle happened to also carry the public roots.
  */
 
 export type GitProviderId = "github" | "gitlab";
@@ -47,6 +54,13 @@ type GitHostProviderConfig = {
    * Undefined for a provider with no self-hosted mode.
    */
   selfHostedEnvName?: string;
+  /**
+   * Server env var naming a PEM CA bundle file trusted for this provider's self-managed
+   * instance(s) — for a private/internal CA the public trust store does not include. Applied
+   * only when the matched remote is self-hosted (never for the provider's SaaS domain — see
+   * the module doc comment for why). Undefined for a provider with no self-hosted mode.
+   */
+  selfHostedCaCertEnvName?: string;
 };
 
 /** Company-secret names probed for a GitHub token, in priority order. */
@@ -81,6 +95,7 @@ const GIT_HOST_PROVIDERS: readonly GitHostProviderConfig[] = [
     secretNames: DEFAULT_GITLAB_TOKEN_SECRET_NAMES,
     envNames: ["GITLAB_TOKEN"],
     selfHostedEnvName: "PAPERCLIP_GITLAB_HOSTS",
+    selfHostedCaCertEnvName: "PAPERCLIP_GITLAB_CA_CERT_PATH",
   },
 ];
 
@@ -126,6 +141,12 @@ function resolveConfiguredSelfHostedHosts(provider: GitHostProviderConfig, env: 
   return Array.from(hosts);
 }
 
+/** This provider's operator-configured self-managed CA bundle path, if any. */
+function resolveConfiguredCaCertPath(provider: GitHostProviderConfig, env: NodeJS.ProcessEnv): string | undefined {
+  if (!provider.selfHostedCaCertEnvName) return undefined;
+  return env[provider.selfHostedCaCertEnvName]?.trim() || undefined;
+}
+
 /**
  * Resolve the supported provider for one remote URL, or null when the URL is out of scope:
  * non-HTTPS, an unsupported host, or already credentialed (inline userinfo, which this module
@@ -154,14 +175,15 @@ function resolveGitHostProvider(remoteUrl: string): GitHostProviderConfig | null
  * host list for a SaaS match (unchanged from before self-hosted support existed), or exactly
  * the one matched self-hosted host and no other configured self-hosted host, so one
  * self-managed instance's token is never offered to a different self-managed instance or to
- * the SaaS domain.
+ * the SaaS domain. `selfHosted` tells the caller whether it is safe to also apply a configured
+ * CA bundle (see `selfHostedCaCertEnvName`) — never for a SaaS match.
  */
 function resolveGitHostMatch(
   remoteUrl: string,
   env: NodeJS.ProcessEnv,
-): { provider: GitHostProviderConfig; scopedHosts: readonly string[] } | null {
+): { provider: GitHostProviderConfig; scopedHosts: readonly string[]; selfHosted: boolean } | null {
   const staticProvider = resolveGitHostProvider(remoteUrl);
-  if (staticProvider) return { provider: staticProvider, scopedHosts: staticProvider.hosts };
+  if (staticProvider) return { provider: staticProvider, scopedHosts: staticProvider.hosts, selfHosted: false };
 
   let parsed: URL;
   try {
@@ -175,7 +197,7 @@ function resolveGitHostMatch(
   const hostWithPort = parsed.host.toLowerCase();
   for (const provider of GIT_HOST_PROVIDERS) {
     if (resolveConfiguredSelfHostedHosts(provider, env).includes(hostWithPort)) {
-      return { provider, scopedHosts: [hostWithPort] };
+      return { provider, scopedHosts: [hostWithPort], selfHosted: true };
     }
   }
   return null;
@@ -280,6 +302,14 @@ export function buildGitAuthInvocation(
    * never offered to a different host, including the provider's own SaaS domain.
    */
   scopedHosts?: readonly string[],
+  /**
+   * A PEM CA bundle path to trust via `GIT_SSL_CAINFO`, for a self-hosted instance on a
+   * private/internal CA. Callers must pass this only alongside a self-hosted `scopedHosts`
+   * (never for a SaaS match): `GIT_SSL_CAINFO` replaces git's default trust store for the git
+   * process it is set on, so applying it to a gitlab.com clone would break that clone's TLS
+   * verification unless the bundle also carried the public roots.
+   */
+  caCertPath?: string,
 ): GitAuthInvocation {
   const provider = getGitHostProvider(credential.providerId);
   const hosts = scopedHosts ?? provider.hosts;
@@ -294,12 +324,16 @@ export function buildGitAuthInvocation(
   for (const host of hosts) {
     configArgs.push("-c", `credential.https://${host}.helper=${helperScript}`);
   }
+  const env: Record<string, string> = {
+    [GIT_CREDENTIAL_TOKEN_ENV_KEY]: credential.token,
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  if (caCertPath) {
+    env.GIT_SSL_CAINFO = caCertPath;
+  }
   return {
     configArgs,
-    env: {
-      [GIT_CREDENTIAL_TOKEN_ENV_KEY]: credential.token,
-      GIT_TERMINAL_PROMPT: "0",
-    },
+    env,
     source: credential.source,
     secretName: credential.secretName,
     providerId: credential.providerId,
@@ -416,7 +450,7 @@ export function createGitRemoteAuthProvider(
   return async (remoteUrl: string) => {
     const match = resolveGitHostMatch(remoteUrl, env);
     if (!match) return null;
-    const { provider, scopedHosts } = match;
+    const { provider, scopedHosts, selfHosted } = match;
     let credentialPromise = credentialPromises.get(provider.id);
     if (!credentialPromise) {
       credentialPromise = resolveCredentialFor(provider);
@@ -424,6 +458,8 @@ export function createGitRemoteAuthProvider(
     }
     const credential = await credentialPromise;
     if (!credential) return null;
-    return buildGitAuthInvocation(credential, scopedHosts);
+    // Only ever applied to a self-hosted match -- see buildGitAuthInvocation's caCertPath doc.
+    const caCertPath = selfHosted ? resolveConfiguredCaCertPath(provider, env) : undefined;
+    return buildGitAuthInvocation(credential, scopedHosts, caCertPath);
   };
 }
